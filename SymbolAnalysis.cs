@@ -1,56 +1,148 @@
-// Inspired by: https://learn.microsoft.com/en-us/dotnet/machine-learning/tutorials/image-classification-api-transfer-learning
+// Inspired by: 
+// * https://learn.microsoft.com/en-us/dotnet/machine-learning/tutorials/image-classification-api-transfer-learning
+// * https://github.com/dotnet/machinelearning-samples/tree/main/samples/csharp/getting-started/DeepLearning_ImageClassification_Training
 
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.IO;
+using ImageClassification.DataModels;
 using Microsoft.ML;
-using static Microsoft.ML.DataOperationsCatalog;
-// using Microsoft.ML.Vision;
+using Microsoft.ML.Transforms;
+using Microsoft.ML.Vision;
+using static Microsoft.ML.Transforms.ValueToKeyMappingEstimator;
 
-class ImageData
-{
-    public string ImagePath { get; set; }
-
-    public string Label { get; set; }
-}
-
-class ModelInput
-{
-    public byte[] Image { get; set; }
-    
-    public UInt32 LabelAsKey { get; set; }
-
-    public string ImagePath { get; set; }
-
-    public string Label { get; set; }
-}
-
-class ModelOutput
-{
-    public string ImagePath { get; set; }
-
-    public string Label { get; set; }
-
-    public string PredictedLabel { get; set; }
-}
+using Common;
 
 namespace SymbolAnalysis
 {
+
     public class Analyser
     {
-        private MLContext mLContext = new MLContext();
+        private MLContext mlContext = new MLContext();
+        private static string projectDirectory = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../"));
+        // private static string workspaceRelativePath = Path.Combine(Analyser.projectDirectory, "workspace");
+        private static string imagesRelativePath = Path.Combine(projectDirectory, "images/symbols");
 
         public void Train()
         {
             Console.WriteLine("Training...");
 
-            var mo = new ModelOutput();
+            // 1. ML Context
+            var mlContext = new MLContext(seed: 1);
+
+            // 2. Load the initial full image-set into an IDataView and shuffle so it'll be better balanced
+            IEnumerable<ImageData> images = Common.Images.LoadImagesFromDirectory(folder: imagesRelativePath, useFolderNameAsLabel: true);
+            IDataView fullImagesDataset = mlContext.Data.LoadFromEnumerable(images);
+            IDataView shuffledFullImageFilePathsDataset = mlContext.Data.ShuffleRows(fullImagesDataset);
+
+
+            // 3. Load Images with in-memory type within the IDataView and Transform Labels to Keys (Categorical)
+            IDataView shuffledFullImagesDataset = mlContext.Transforms.Conversion.
+                    MapValueToKey(outputColumnName: "LabelAsKey", inputColumnName: "Label", keyOrdinality: KeyOrdinality.ByValue)
+                .Append(mlContext.Transforms.LoadRawImageBytes(
+                                                outputColumnName: "Image",
+                                                imageFolder: fullImagesetFolderPath,
+                                                inputColumnName: "ImagePath"))
+                .Fit(shuffledFullImageFilePathsDataset)
+                .Transform(shuffledFullImageFilePathsDataset);
+                
+
+            // 4. Split the data 80:20 into train and test sets, train and evaluate.
+            var trainTestData = mlContext.Data.TrainTestSplit(shuffledFullImagesDataset, testFraction: 0.2);
+            IDataView trainDataView = trainTestData.TrainSet;
+            IDataView testDataView = trainTestData.TestSet;
+
+            // 5. Define the model's training pipeline using DNN default values
+            //
+            var pipeline = mlContext.MulticlassClassification.Trainers
+                    .ImageClassification(featureColumnName: "Image",
+                                            labelColumnName: "LabelAsKey",
+                                            validationSet: testDataView)
+                .Append(mlContext.Transforms.Conversion.MapKeyToValue(outputColumnName: "PredictedLabel",
+                                                                    inputColumnName: "PredictedLabel"));
+
+
+            // 5.1 (OPTIONAL) Define the model's training pipeline by using explicit hyper-parameters
+
+            var options = new ImageClassificationTrainer.Options()
+            {
+                FeatureColumnName = "Image",
+                LabelColumnName = "LabelAsKey",
+                // Just by changing/selecting InceptionV3/MobilenetV2/ResnetV250
+                // you can try a different DNN architecture (TensorFlow pre-trained model).
+                Arch = ImageClassificationTrainer.Architecture.MobilenetV2,
+                Epoch = 50,       //100
+                BatchSize = 10,
+                LearningRate = 0.01f,
+                MetricsCallback = (metrics) => Console.WriteLine(metrics),
+                ValidationSet = testDataView
+            };
+
+            var pipeline = mlContext.MulticlassClassification.Trainers.ImageClassification(options)
+                    .Append(mlContext.Transforms.Conversion.MapKeyToValue(
+                        outputColumnName: "PredictedLabel",
+                        inputColumnName: "PredictedLabel"));
+
+
+            // 4. Train/create the ML model
+            ITransformer trainedModel = pipeline.Fit(trainDataView);
+
+            // 5. Get the quality metrics (accuracy, etc.)
+            IDataView predictionsDataView = trainedModel.Transform(testDataset);
+
+            var metrics = mlContext.MulticlassClassification.Evaluate(predictionsDataView, labelColumnName:"LabelAsKey", predictedLabelColumnName: "PredictedLabel");
+            ConsoleHelper.PrintMultiClassClassificationMetrics("TensorFlow DNN Transfer Learning", metrics);
+
+            // Save the model to assets/outputs (You get ML.NET .zip model file and TensorFlow .pb model file)
+            mlContext.Model.Save(trainedModel, trainDataView.Schema, outputMlNetModelFilePath);
+
+            // IEnumerable<ImageData> images = LoadImagesFromDirectory(folder: assetsRelativePath, useFolderNameAsLabel: true);
+            // IDataView imageData = mlContext.Data.LoadFromEnumerable(images);
+            // IDataView shuffledData = mlContext.Data.ShuffleRows(imageData);
+
+            // // Machine learning models expect input to be in numerical format. 
+            // // Therefore, some preprocessing needs to be done on the data prior 
+            // // to training. Create an EstimatorChain made up of the MapValueToKey 
+            // // and LoadRawImageBytes transforms. The MapValueToKey transform 
+            // // takes the categorical value in the Label column, converts it to 
+            // // a numerical KeyType value and stores it in a new column called 
+            // // LabelAsKey. The LoadImages takes the values from the ImagePath 
+            // // column along with the imageFolder parameter to load images for training.
+            // var preprocessingPipeline = mlContext.Transforms.Conversion.MapValueToKey(
+            //         inputColumnName: "Label",
+            //         outputColumnName: "LabelAsKey")
+            //     .Append(mlContext.Transforms.LoadRawImageBytes(
+            //         outputColumnName: "Image",
+            //         imageFolder: assetsRelativePath,
+            //         inputColumnName: "ImagePath"));
+                                
+
+            // IDataView preProcessedData = preprocessingPipeline
+            //         .Fit(shuffledData)
+            //         .Transform(shuffledData);
+
+            // // split 70/30 for training/validation
+            // TrainTestData trainSplit = mlContext.Data.TrainTestSplit(data: preProcessedData, testFraction: 0.3);
+            // // further split validation 90/10 for validation/testing
+            // TrainTestData validationTestSplit = mlContext.Data.TrainTestSplit(trainSplit.TestSet, testFraction: 0.1);
+
+            // IDataView trainSet = trainSplit.TrainSet;
+            // IDataView validationSet = validationTestSplit.TrainSet;
+            // IDataView testSet = validationTestSplit.TestSet;
+
+            // var classifierOptions = new ImageClassificationTrainer.Options()
+            // {
+            //     FeatureColumnName = "Image",
+            //     LabelColumnName = "LabelAsKey",
+            //     ValidationSet = validationSet,
+            //     Arch = ImageClassificationTrainer.Architecture.ResnetV2101,
+            //     MetricsCallback = (metrics) => Console.WriteLine(metrics),
+            //     TestOnTrainSet = false,
+            //     ReuseTrainSetBottleneckCachedValues = true,
+            //     ReuseValidationSetBottleneckCachedValues = true
+            // };            
         }
 
-        IEnumerable<ImageData> LoadImagesFromDirectory(string folder, bool useFolderNameAsLabel = true)
-        {
-
-        }
     }
 }
