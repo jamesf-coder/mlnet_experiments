@@ -1,21 +1,9 @@
 ﻿using System;
-using Microsoft.ML;
+using MLExperiments;
 
-using SymbolAnalysis;
+Console.WriteLine("Hello world.");
 
-namespace TestML
-{
-    class Program
-    {
-        static void Main(string[] args)
-        {
+var sa = new MLExperiments.SymbolAnalyser();
+sa.Train();
 
-            Console.WriteLine("Hello world.");
-
-            var sa = new Analyser();
-            sa.Train();
-
-        }
-    }
-
-}
+sa.TrySinglePrediction("./images/symbols_test/");

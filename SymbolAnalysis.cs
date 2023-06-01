@@ -6,23 +6,25 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.IO;
-using ImageClassification.DataModels;
+// using ImageClassification.DataModels;
 using Microsoft.ML;
 using Microsoft.ML.Transforms;
 using Microsoft.ML.Vision;
 using static Microsoft.ML.Transforms.ValueToKeyMappingEstimator;
+using System.Diagnostics;
 
-using Common;
-
-namespace SymbolAnalysis
+namespace MLExperiments
 {
 
-    public class Analyser
+    public class SymbolAnalyser
     {
         private MLContext mlContext = new MLContext();
+        private ITransformer? trainedModel;
         private static string projectDirectory = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../"));
         // private static string workspaceRelativePath = Path.Combine(Analyser.projectDirectory, "workspace");
         private static string imagesRelativePath = Path.Combine(projectDirectory, "images/symbols");
+
+        private static string outputMlNetModelFilePath = Path.Combine(projectDirectory, "models");
 
         public void Train()
         {
@@ -32,7 +34,7 @@ namespace SymbolAnalysis
             var mlContext = new MLContext(seed: 1);
 
             // 2. Load the initial full image-set into an IDataView and shuffle so it'll be better balanced
-            IEnumerable<ImageData> images = Common.Images.LoadImagesFromDirectory(folder: imagesRelativePath, useFolderNameAsLabel: true);
+            IEnumerable<ImageData> images = MLExperiments.Images.LoadImagesFromDirectory(folder: imagesRelativePath, useFolderNameAsLabel: true);
             IDataView fullImagesDataset = mlContext.Data.LoadFromEnumerable(images);
             IDataView shuffledFullImageFilePathsDataset = mlContext.Data.ShuffleRows(fullImagesDataset);
 
@@ -42,7 +44,7 @@ namespace SymbolAnalysis
                     MapValueToKey(outputColumnName: "LabelAsKey", inputColumnName: "Label", keyOrdinality: KeyOrdinality.ByValue)
                 .Append(mlContext.Transforms.LoadRawImageBytes(
                                                 outputColumnName: "Image",
-                                                imageFolder: fullImagesetFolderPath,
+                                                imageFolder: imagesRelativePath,
                                                 inputColumnName: "ImagePath"))
                 .Fit(shuffledFullImageFilePathsDataset)
                 .Transform(shuffledFullImageFilePathsDataset);
@@ -64,35 +66,32 @@ namespace SymbolAnalysis
 
 
             // 5.1 (OPTIONAL) Define the model's training pipeline by using explicit hyper-parameters
+            // 
+            // var options = new ImageClassificationTrainer.Options()
+            // {
+            //     FeatureColumnName = "Image",
+            //     LabelColumnName = "LabelAsKey",
+            //     // Just by changing/selecting InceptionV3/MobilenetV2/ResnetV250
+            //     // you can try a different DNN architecture (TensorFlow pre-trained model).
+            //     Arch = ImageClassificationTrainer.Architecture.MobilenetV2,
+            //     Epoch = 50,       //100
+            //     BatchSize = 10,
+            //     LearningRate = 0.01f,
+            //     MetricsCallback = (metrics) => Console.WriteLine(metrics),
+            //     ValidationSet = testDataView
+            // };
 
-            var options = new ImageClassificationTrainer.Options()
-            {
-                FeatureColumnName = "Image",
-                LabelColumnName = "LabelAsKey",
-                // Just by changing/selecting InceptionV3/MobilenetV2/ResnetV250
-                // you can try a different DNN architecture (TensorFlow pre-trained model).
-                Arch = ImageClassificationTrainer.Architecture.MobilenetV2,
-                Epoch = 50,       //100
-                BatchSize = 10,
-                LearningRate = 0.01f,
-                MetricsCallback = (metrics) => Console.WriteLine(metrics),
-                ValidationSet = testDataView
-            };
-
-            var pipeline = mlContext.MulticlassClassification.Trainers.ImageClassification(options)
-                    .Append(mlContext.Transforms.Conversion.MapKeyToValue(
-                        outputColumnName: "PredictedLabel",
-                        inputColumnName: "PredictedLabel"));
+            // var pipeline = mlContext.MulticlassClassification.Trainers.ImageClassification(options)
+            //         .Append(mlContext.Transforms.Conversion.MapKeyToValue(
+            //             outputColumnName: "PredictedLabel",
+            //             inputColumnName: "PredictedLabel"));
 
 
             // 4. Train/create the ML model
-            ITransformer trainedModel = pipeline.Fit(trainDataView);
+            trainedModel = pipeline.Fit(trainDataView);
 
             // 5. Get the quality metrics (accuracy, etc.)
-            IDataView predictionsDataView = trainedModel.Transform(testDataset);
-
-            var metrics = mlContext.MulticlassClassification.Evaluate(predictionsDataView, labelColumnName:"LabelAsKey", predictedLabelColumnName: "PredictedLabel");
-            ConsoleHelper.PrintMultiClassClassificationMetrics("TensorFlow DNN Transfer Learning", metrics);
+            EvaluateModel(mlContext, testDataView, trainedModel);
 
             // Save the model to assets/outputs (You get ML.NET .zip model file and TensorFlow .pb model file)
             mlContext.Model.Save(trainedModel, trainDataView.Schema, outputMlNetModelFilePath);
@@ -144,5 +143,40 @@ namespace SymbolAnalysis
             // };            
         }
 
+        private static void EvaluateModel(MLContext mlContext, IDataView testDataset, ITransformer trainedModel)
+        {
+            Console.WriteLine("Making predictions in bulk for evaluating model's quality...");
+
+            // Measuring time
+            var watch = Stopwatch.StartNew();
+
+            var predictionsDataView = trainedModel.Transform(testDataset);
+
+            var metrics = mlContext.MulticlassClassification.Evaluate(predictionsDataView, labelColumnName:"LabelAsKey", predictedLabelColumnName: "PredictedLabel");
+            // ConsoleHelper.PrintMultiClassClassificationMetrics("TensorFlow DNN Transfer Learning", metrics);
+
+            watch.Stop();
+            var elapsed2Ms = watch.ElapsedMilliseconds;
+
+            Console.WriteLine($"Predicting and Evaluation took: {elapsed2Ms / 1000} seconds");
+        }
+
+
+        public void TrySinglePrediction(string imagesFolderPathForPredictions)
+        {
+            // Create prediction function to try one prediction
+            var predictionEngine = mlContext.Model.CreatePredictionEngine<InMemoryImageData, ImagePrediction>(trainedModel);
+
+            var testImages = FileUtils.LoadInMemoryImagesFromDirectory(imagesFolderPathForPredictions, false);
+
+            var imageToPredict = testImages.First();
+
+            var prediction = predictionEngine.Predict(imageToPredict);
+
+            Console.WriteLine(
+                $"Image Filename : [{imageToPredict.ImageFileName}], " +
+                $"Scores : [{string.Join(",", prediction.Score)}], " +
+                $"Predicted Label : {prediction.PredictedLabel}");
+        }
     }
 }
